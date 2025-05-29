@@ -11,7 +11,7 @@ from geetest.Validator import Validator
 from task.buy import buy_new_terminal
 from util import ConfigDB, Endpoint, GlobalStatusInstance, time_service
 from util import bili_ticket_gt_python
-
+from util.ProxyProvider import get_proxies_from_kuaidaili, filter_and_rank_proxies, ping_proxy
 
 def withTimeString(string):
     return f"{datetime.datetime.now()}: {string}"
@@ -110,32 +110,206 @@ def go_tab(demo: gr.Blocks):
             type="index",
             value=ways[select_way],
         )
-        with gr.Accordion(label="填写你的HTTPS代理服务器[可选]", open=False):
+
+        with gr.Accordion(label="填写你的HTTPS代理服务器 [可选]", open=False):
             gr.Markdown("""
-                        > **注意**：
+            > 可选择 “手动输入” 或 “使用快代理 API 拉取”，程序在风控时将使用这些代理重试请求。
+            """)
 
-                        填写代理服务器地址后，程序在使用这个配置文件后会在出现风控后后根据代理服务器去访问哔哩哔哩的抢票接口。
+            # 选择模式
+            proxy_mode_radio = gr.Radio(
+                ["手动输入", "使用快代理 API 自动拉取"],
+                label="代理配置方式",
+                value="手动输入",
+                interactive=True
+            )
 
-                        抢票前请确保代理服务器已经开启，并且可以正常访问哔哩哔哩的抢票接口。
+            # 表格展示代理状态
+            proxy_status_table = gr.Dataframe(
+                headers=["代理地址", "状态"],
+                datatype=["str", "str"],
+                row_count=(5, "dynamic"),
+                col_count=(2, "fixed"),
+                label="代理可达性列表",
+                interactive=False
+            )
 
-                        """)
-
-            def get_latest_proxy():
-                return ConfigDB.get("https_proxy") or ""
-
+            # ==== 手动输入 ====
             https_proxy_ui = gr.Textbox(
-                label="填写抢票时候的代理服务器地址，使用逗号隔开|输入Enter保存",
-                info="例如： http://127.0.0.1:8080,http://127.0.0.1:8081,http://127.0.0.1:8082",
-                value=get_latest_proxy,
+                label="手动输入代理地址（多个用逗号分隔）",
+                info="格式: http://1.1.1.1:8080,http://2.2.2.2:8080",
+                visible=True,
+                value=ConfigDB.get("https_proxy") or "",
             )
 
-            def input_https_proxy(_https_proxy):
-                ConfigDB.insert("https_proxy", _https_proxy)
-                return gr.update(ConfigDB.get("https_proxy"))
+            https_proxy_submit_btn = gr.Button("保存并检测这些代理", visible=True)
 
-            https_proxy_ui.submit(
-                fn=input_https_proxy, inputs=https_proxy_ui, outputs=https_proxy_ui
+            def save_manual_proxy(proxy_str):
+                proxies = [p.strip() for p in proxy_str.split(",") if p.strip()]
+                if not proxies:
+                    return [["❌ 无代理", ""]]
+
+                ConfigDB.insert("https_proxy", proxy_str)
+                results = []
+                for proxy in proxies:
+                    try:
+                        rtt = ping_proxy(proxy)
+                        if rtt == float("inf"):
+                            results.append([proxy, "❌ 不可达"])
+                        else:
+                            results.append([proxy, f"✅ {rtt:.2f}s"])
+                    except Exception:
+                        results.append([proxy, "❌ 测试异常"])
+                return results
+
+            https_proxy_submit_btn.click(
+                fn=save_manual_proxy,
+                inputs=https_proxy_ui,
+                outputs=proxy_status_table,
+                queue=False,
             )
+
+            # ==== 快代理 ====
+            with gr.Row():
+                kuaidaili_secret_id_ui = gr.Textbox(
+                    label="快代理 订单 secret_id",
+                    value=ConfigDB.get("kuaidaili_secret_id") or "",
+                    visible=False,  # 初始不可见
+                )
+                kuaidaili_signature_ui = gr.Textbox(
+                    label="快代理 订单 signature/secret_key",
+                    value=ConfigDB.get("kuaidaili_signature") or "",
+                    visible=False,  # 初始不可见
+                )
+            with gr.Row():
+                kuaidaili_username_ui = gr.Textbox(
+                    label="快代理 用户名",
+                    value=ConfigDB.get("kuaidaili_username") or "",
+                    visible=False,  # 初始不可见
+                )
+                kuaidaili_password_ui = gr.Textbox(
+                    label="快代理 密码",
+                    value=ConfigDB.get("kuaidaili_password") or "",
+                    visible=False,  # 初始不可见
+                )
+            with gr.Row():
+                kuaidaili_num_ui = gr.Number(
+                    label="拉取代理数量",
+                    value=5,
+                    minimum=1,
+                    maximum=100,
+                    step=1,
+                    visible=False,  # 初始不可见
+                )
+                kuaidaili_max_timeout_ui = gr.Number(
+                    label="代理测试最大超时 (秒)",
+                    value=5,
+                    minimum=1,
+                    maximum=30,
+                    step=1,
+                    visible=False,  # 初始不可见
+                )
+
+            def save_secret_id(secret_id):
+                ConfigDB.insert("kuaidaili_secret_id", secret_id)
+            def save_signature(signature):
+                ConfigDB.insert("kuaidaili_signature", signature)
+            def save_username(username):
+                ConfigDB.insert("kuaidaili_username", username)
+            def save_password(password):
+                ConfigDB.insert("kuaidaili_password", password)
+            def save_kuaidaili_num(num):
+                ConfigDB.insert("kuaidaili_num", num)
+            def save_kuaidaili_max_timeout(max_timeout):
+                ConfigDB.insert("kuaidaili_max_timeout", max_timeout)
+
+            kuaidaili_secret_id_ui.change(fn=save_secret_id, inputs=kuaidaili_secret_id_ui)
+            kuaidaili_signature_ui.change(fn=save_signature, inputs=kuaidaili_signature_ui)
+            kuaidaili_username_ui.change(fn=save_username, inputs=kuaidaili_username_ui)
+            kuaidaili_password_ui.change(fn=save_password, inputs=kuaidaili_password_ui)
+            kuaidaili_num_ui.change(fn=save_kuaidaili_num, inputs=kuaidaili_num_ui)
+            kuaidaili_max_timeout_ui.change(fn=save_kuaidaili_max_timeout, inputs=kuaidaili_max_timeout_ui)
+
+            refresh_proxy_btn = gr.Button("从快代理拉取并检测", visible=False)  # 初始不可见
+
+            def refresh_proxies_with_status():
+                signature = ConfigDB.get("kuaidaili_signature")
+                if not signature:
+                    return [["❌ 请填写 signature", ""]]
+                secret_id = ConfigDB.get("kuaidaili_secret_id")
+                if not secret_id:
+                    return [["❌ 请填写 secret_id", ""]]
+                username = ConfigDB.get("kuaidaili_username")
+                if not username:
+                    return [["❌ 请填写用户名", ""]]
+                password = ConfigDB.get("kuaidaili_password")
+                if not password:
+                    return [["❌ 请填写密码", ""]]
+                num = ConfigDB.get("kuaidaili_num") or 5
+                if not isinstance(num, int) or num <= 0:
+                    return [["❌ 请填写有效的拉取数量", ""]]
+                max_timeout = ConfigDB.get("kuaidaili_max_timeout") or 5
+                if not isinstance(max_timeout, (int, float)) or max_timeout <= 0:
+                    return [["❌ 请填写有效的最大超时", ""]]
+                raw_list = get_proxies_from_kuaidaili(signature, secret_id, username, password, num, max_timeout=max_timeout)
+                if not raw_list:
+                    return [["❌ 拉取失败", ""]]
+
+                results = []
+                valid = []
+                logger.info(f"获取到 {len(raw_list)} 个代理")
+                logger.info(f"代理列表: {raw_list}")
+                for proxy in raw_list:
+                    rtt = ping_proxy(proxy)
+                    if rtt == float("inf"):
+                        results.append([proxy, "❌ 不可达"])
+                    else:
+                        results.append([proxy, f"✅ {rtt:.2f}s"])
+                        valid.append(proxy)
+
+                ConfigDB.insert("https_proxy", ",".join(valid))
+                return results
+
+            refresh_proxy_btn.click(
+                fn=refresh_proxies_with_status,
+                inputs=[],
+                outputs=proxy_status_table,
+                queue=False,
+            )
+
+            # ==== 模式切换逻辑 ====
+            def toggle_proxy_mode(mode):
+                is_manual = (mode == "手动输入")
+                return (
+                    gr.update(visible=is_manual),        # https_proxy_ui
+                    gr.update(visible=is_manual),        # submit_btn
+                    gr.update(visible=not is_manual),    # kuaidaili_secret_id_ui
+                    gr.update(visible=not is_manual),    # kuaidaili_signature_ui
+                    gr.update(visible=not is_manual),    # kuaidaili_username_ui
+                    gr.update(visible=not is_manual),    # kuaidaili_password_ui
+                    gr.update(visible=not is_manual),    # kuaidaili_num_ui
+                    gr.update(visible=not is_manual),    # kuaidaili_max_timeout_ui
+                    gr.update(visible=not is_manual),    # refresh btn
+                )
+
+            proxy_mode_radio.change(
+                fn=toggle_proxy_mode,
+                inputs=proxy_mode_radio,
+                outputs=[
+                    https_proxy_ui,
+                    https_proxy_submit_btn,
+                    kuaidaili_secret_id_ui,
+                    kuaidaili_signature_ui,
+                    kuaidaili_username_ui,
+                    kuaidaili_password_ui,
+                    kuaidaili_num_ui,
+                    kuaidaili_max_timeout_ui,
+                    refresh_proxy_btn
+                ],
+                queue=False,
+            )
+
+
         with gr.Accordion(label="配置抢票声音提醒[可选]", open=False):
             with gr.Row():
                 audio_path_ui = gr.Audio(
@@ -444,7 +618,7 @@ def go_tab(demo: gr.Blocks):
     )
 
     go_btn = gr.Button("开始抢票")
-    process_btn = gr.Button("开始蹲票", visible=False)
+    process_btn = gr.Button("开始蹲票")
 
     _time_tmp = gr.Textbox(visible=False)
     go_btn.click(
