@@ -243,7 +243,7 @@ def on_submit_all(
 def upload_file(filepath):
     gr.Info("已经注销，请选择登录信息文件", duration=5)
     try:
-        shutil.copy2(GLOBAL_COOKIE_PATH, filepath)
+        shutil.copy2(filepath, GLOBAL_COOKIE_PATH)
         set_main_request(BiliRequest(cookies_config_path=GLOBAL_COOKIE_PATH))
         name = main_request.get_request_name()
         gr.Info("导入成功", duration=5)
